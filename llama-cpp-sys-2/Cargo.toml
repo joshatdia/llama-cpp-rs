@@ -60,7 +60,7 @@ include = [
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ggml-sys = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
+ggml-rs = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
 
 [build-dependencies]
 bindgen = { workspace = true }
@@ -83,4 +83,4 @@ openmp = []
 shared-stdcxx = []
 mtmd = []
 # Use shared GGML backend to avoid duplicate symbol conflicts
-use-shared-ggml = ["ggml-sys"]
+use-shared-ggml = ["ggml-rs"]

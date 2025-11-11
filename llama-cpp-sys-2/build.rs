@@ -209,15 +209,32 @@ fn main() {
     let llama_src = Path::new(&manifest_dir).join("llama.cpp");
     let build_shared_libs = cfg!(feature = "dynamic-link");
 
-    // Get ggml-sys paths if available (when use-shared-ggml is enabled)
-    let ggml_lib_dir = env::var("DEP_GGML_SYS_ROOT")
-        .map(|root| PathBuf::from(root).join("lib"))
-        .ok();
-    let ggml_include_dir = env::var("DEP_GGML_SYS_INCLUDE")
+    // Get ggml-rs paths if available (when use-shared-ggml is enabled)
+    let ggml_include_dir = env::var("DEP_GGML_RS_INCLUDE")
         .map(PathBuf::from)
-        .ok();
+        .ok()
+        .or_else(|| {
+            // Fallback: try to find it from DEP_GGML_RS_ROOT
+            env::var("DEP_GGML_RS_ROOT")
+                .map(|root| PathBuf::from(root).join("include"))
+                .ok()
+        });
+    let ggml_lib_dir = env::var("DEP_GGML_RS_LIB")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            // Fallback: try to find it from DEP_GGML_RS_ROOT
+            env::var("DEP_GGML_RS_ROOT")
+                .map(|root| PathBuf::from(root).join("lib"))
+                .ok()
+        });
     let ggml_prefix = ggml_lib_dir.as_ref()
-        .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()));
+        .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()))
+        .or_else(|| {
+            env::var("DEP_GGML_RS_ROOT")
+                .map(PathBuf::from)
+                .ok()
+        });
 
     let build_shared_libs = std::env::var("LLAMA_BUILD_SHARED_LIBS")
         .map(|v| v == "1")
@@ -275,10 +292,28 @@ fn main() {
         .header("wrapper.h")
         .clang_arg(format!("-I{}", llama_src.join("include").display()));
 
-    // When use-shared-ggml is enabled, use ggml-sys headers
+    // When use-shared-ggml is enabled, use ggml-rs headers
     if cfg!(feature = "use-shared-ggml") {
         if let Some(ref include_dir) = ggml_include_dir {
-            bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
+            if include_dir.exists() {
+                bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
+            } else {
+                // Try alternative paths
+                if let Ok(root) = env::var("DEP_GGML_RS_ROOT") {
+                    let alt_include = PathBuf::from(root).join("include");
+                    if alt_include.exists() {
+                        bindings_builder = bindings_builder.clang_arg(format!("-I{}", alt_include.display()));
+                    }
+                }
+            }
+        } else {
+            // Fallback: try to find it from DEP_GGML_RS_ROOT
+            if let Ok(root) = env::var("DEP_GGML_RS_ROOT") {
+                let include_path = PathBuf::from(root).join("include");
+                if include_path.exists() {
+                    bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_path.display()));
+                }
+            }
         }
     } else {
         // Use embedded ggml headers
@@ -514,7 +549,7 @@ fn main() {
         
         // CRITICAL: Tell CMake where to find ggml
         if let Some(ref prefix) = ggml_prefix {
-            // Set CMAKE_PREFIX_PATH to where ggml-sys installed ggml
+            // Set CMAKE_PREFIX_PATH to where ggml-rs installed ggml
             config.define("CMAKE_PREFIX_PATH", prefix.to_str().unwrap());
             // Set ggml_DIR to the cmake config directory
             let ggml_cmake_dir = prefix.join("lib").join("cmake").join("ggml");
@@ -526,14 +561,18 @@ fn main() {
         // Alternative: If CMake config files aren't in the expected location,
         // you may need to set additional paths
         if let Some(ref lib_dir) = ggml_lib_dir {
-            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            if lib_dir.exists() {
+                println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            }
         }
         if let Some(ref include_dir) = ggml_include_dir {
-            // Add include directory for CMake
-            config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
+            if include_dir.exists() {
+                // Add include directory for CMake
+                config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
+            }
         }
         
-        // Link to shared ggml libraries from ggml-sys
+        // Link to shared ggml libraries from ggml-rs
         println!("cargo:rustc-link-lib=dylib=ggml");
         println!("cargo:rustc-link-lib=dylib=ggml-base");
         println!("cargo:rustc-link-lib=dylib=ggml-cpu");
@@ -817,9 +856,9 @@ fn main() {
     let llama_libs = extract_lib_names(&out_dir, build_shared_libs);
     assert_ne!(llama_libs.len(), 0);
 
-    // Filter out ggml libraries when use-shared-ggml is enabled - they're already linked from ggml-sys
+    // Filter out ggml libraries when use-shared-ggml is enabled - they're already linked from ggml-rs
     let llama_libs: Vec<String> = if cfg!(feature = "use-shared-ggml") {
-        // Filter out ggml libraries - they're already linked from ggml-sys
+        // Filter out ggml libraries - they're already linked from ggml-rs
         llama_libs
             .into_iter()
             .filter(|lib| !lib.starts_with("ggml"))
