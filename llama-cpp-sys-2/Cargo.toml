@@ -60,6 +60,7 @@ include = [
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+ggml-sys = { version = "*", optional = true }
 
 [build-dependencies]
 bindgen = { workspace = true }
@@ -81,3 +82,5 @@ openmp = []
 # Only has an impact on Android.
 shared-stdcxx = []
 mtmd = []
+# Use shared GGML backend to avoid duplicate symbol conflicts
+use-shared-ggml = ["ggml-sys"]

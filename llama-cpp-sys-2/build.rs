@@ -209,6 +209,16 @@ fn main() {
     let llama_src = Path::new(&manifest_dir).join("llama.cpp");
     let build_shared_libs = cfg!(feature = "dynamic-link");
 
+    // Get ggml-sys paths if available (when use-shared-ggml is enabled)
+    let ggml_lib_dir = env::var("DEP_GGML_SYS_ROOT")
+        .map(|root| PathBuf::from(root).join("lib"))
+        .ok();
+    let ggml_include_dir = env::var("DEP_GGML_SYS_INCLUDE")
+        .map(PathBuf::from)
+        .ok();
+    let ggml_prefix = ggml_lib_dir.as_ref()
+        .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()));
+
     let build_shared_libs = std::env::var("LLAMA_BUILD_SHARED_LIBS")
         .map(|v| v == "1")
         .unwrap_or(build_shared_libs);
@@ -263,8 +273,19 @@ fn main() {
     // Bindings
     let mut bindings_builder = bindgen::Builder::default()
         .header("wrapper.h")
-        .clang_arg(format!("-I{}", llama_src.join("include").display()))
-        .clang_arg(format!("-I{}", llama_src.join("ggml/include").display()))
+        .clang_arg(format!("-I{}", llama_src.join("include").display()));
+
+    // When use-shared-ggml is enabled, use ggml-sys headers
+    if cfg!(feature = "use-shared-ggml") {
+        if let Some(ref include_dir) = ggml_include_dir {
+            bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
+        }
+    } else {
+        // Use embedded ggml headers
+        bindings_builder = bindings_builder.clang_arg(format!("-I{}", llama_src.join("ggml/include").display()));
+    }
+
+    let mut bindings_builder = bindings_builder
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .derive_partialeq(true)
         .allowlist_function("ggml_.*")
@@ -485,6 +506,54 @@ fn main() {
     // Build with Cmake
 
     let mut config = Config::new(&llama_src);
+
+    // If use-shared-ggml feature is enabled, use system ggml (shared library)
+    if cfg!(feature = "use-shared-ggml") {
+        // Tell CMake to use system ggml instead of building it
+        config.define("LLAMA_USE_SYSTEM_GGML", "ON");
+        
+        // CRITICAL: Tell CMake where to find ggml
+        if let Some(ref prefix) = ggml_prefix {
+            // Set CMAKE_PREFIX_PATH to where ggml-sys installed ggml
+            config.define("CMAKE_PREFIX_PATH", prefix.to_str().unwrap());
+            // Set ggml_DIR to the cmake config directory
+            let ggml_cmake_dir = prefix.join("lib").join("cmake").join("ggml");
+            if ggml_cmake_dir.exists() {
+                config.define("ggml_DIR", ggml_cmake_dir.to_str().unwrap());
+            }
+        }
+        
+        // Alternative: If CMake config files aren't in the expected location,
+        // you may need to set additional paths
+        if let Some(ref lib_dir) = ggml_lib_dir {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        }
+        if let Some(ref include_dir) = ggml_include_dir {
+            // Add include directory for CMake
+            config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
+        }
+        
+        // Link to shared ggml libraries from ggml-sys
+        println!("cargo:rustc-link-lib=dylib=ggml");
+        println!("cargo:rustc-link-lib=dylib=ggml-base");
+        println!("cargo:rustc-link-lib=dylib=ggml-cpu");
+        
+        if cfg!(target_os = "macos") {
+            println!("cargo:rustc-link-lib=dylib=ggml-blas");
+        }
+        
+        if cfg!(feature = "vulkan") {
+            println!("cargo:rustc-link-lib=dylib=ggml-vulkan");
+        }
+        
+        if cfg!(feature = "metal") {
+            println!("cargo:rustc-link-lib=dylib=ggml-metal");
+        }
+        
+        if cfg!(feature = "cuda") {
+            println!("cargo:rustc-link-lib=dylib=ggml-cuda");
+        }
+    }
 
     // Would require extra source files to pointlessly
     // be included in what's uploaded to and downloaded from
@@ -747,6 +816,18 @@ fn main() {
     let llama_libs_kind = if build_shared_libs { "dylib" } else { "static" };
     let llama_libs = extract_lib_names(&out_dir, build_shared_libs);
     assert_ne!(llama_libs.len(), 0);
+
+    // Filter out ggml libraries when use-shared-ggml is enabled - they're already linked from ggml-sys
+    let llama_libs: Vec<String> = if cfg!(feature = "use-shared-ggml") {
+        // Filter out ggml libraries - they're already linked from ggml-sys
+        llama_libs
+            .into_iter()
+            .filter(|lib| !lib.starts_with("ggml"))
+            .collect()
+    } else {
+        // Original code: include all libraries including embedded ggml
+        llama_libs
+    };
 
     for lib in llama_libs {
         let link = format!("cargo:rustc-link-lib={}={}", llama_libs_kind, lib);
