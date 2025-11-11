@@ -284,11 +284,32 @@ fn main() {
 
     // When use-shared-ggml is enabled, use ggml-rs headers instead of embedded ggml
     if cfg!(feature = "use-shared-ggml") {
+        debug_log!("use-shared-ggml feature is enabled");
+        debug_log!("DEP_GGML_RS_INCLUDE: {:?}", env::var("DEP_GGML_RS_INCLUDE"));
+        debug_log!("DEP_GGML_RS_ROOT: {:?}", env::var("DEP_GGML_RS_ROOT"));
+        debug_log!("ggml_include_dir: {:?}", ggml_include_dir);
+        
         if let Some(ref include_dir) = ggml_include_dir {
+            debug_log!("Using ggml-rs include directory: {}", include_dir.display());
             bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
+        } else {
+            // Fallback: try to find it from DEP_GGML_RS_ROOT
+            if let Ok(root) = env::var("DEP_GGML_RS_ROOT") {
+                let include_path = PathBuf::from(root).join("include");
+                debug_log!("Trying fallback include path: {}", include_path.display());
+                if include_path.exists() {
+                    debug_log!("Using fallback include directory: {}", include_path.display());
+                    bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_path.display()));
+                } else {
+                    panic!("use-shared-ggml feature is enabled but cannot find ggml-rs headers. DEP_GGML_RS_INCLUDE or DEP_GGML_RS_ROOT/include must be set. Tried: {}", include_path.display());
+                }
+            } else {
+                panic!("use-shared-ggml feature is enabled but DEP_GGML_RS_ROOT is not set. Make sure ggml-rs is properly configured and the dependency is added to Cargo.toml.");
+            }
         }
     } else {
         // Use embedded ggml headers
+        debug_log!("Using embedded ggml headers");
         bindings_builder = bindings_builder.clang_arg(format!("-I{}", llama_src.join("ggml/include").display()));
     }
 
