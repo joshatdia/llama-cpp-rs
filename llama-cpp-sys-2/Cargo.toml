@@ -85,3 +85,7 @@ shared-stdcxx = []
 mtmd = []
 # Use shared GGML backend to avoid duplicate symbol conflicts
 use-shared-ggml = ["ggml-rs"]
+# Feature combinations: when use-shared-ggml is enabled, propagate features to ggml-rs
+# Note: Parent crates can enable these combinations, or enable features on ggml-rs directly
+# Example: cargo build --features use-shared-ggml,cuda
+# Or in Cargo.toml: ggml-rs = { version = "...", features = ["cuda"] }

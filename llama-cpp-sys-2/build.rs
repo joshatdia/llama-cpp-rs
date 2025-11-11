@@ -614,6 +614,31 @@ fn main() {
         // Note: Feature-specific libraries (ggml-cuda, ggml-vulkan, ggml-metal, etc.)
         // are handled by ggml-rs when it's built with those features.
         // We don't need to link them here to avoid duplicate symbols.
+        
+        // Warn if features are requested but ggml-rs might not have them
+        // Note: Parent crates must enable features on ggml-rs directly in Cargo.toml
+        // Example: ggml-rs = { version = "...", features = ["cuda"] }
+        if cfg!(feature = "cuda") {
+            if let Some(ref lib_dir) = ggml_lib_dir {
+                let cuda_lib_pattern = if cfg!(windows) {
+                    "ggml-cuda.dll"
+                } else if cfg!(target_os = "macos") {
+                    "libggml-cuda.dylib"
+                } else {
+                    "libggml-cuda.so"
+                };
+                let cuda_lib = lib_dir.join(cuda_lib_pattern);
+                if !cuda_lib.exists() {
+                    eprintln!(
+                        "cargo:warning=CUDA feature is enabled but ggml-cuda library not found in {}.\n\
+                         Make sure ggml-rs is built with CUDA support.\n\
+                         In your Cargo.toml, enable the cuda feature on ggml-rs:\n\
+                         ggml-rs = {{ version = \"...\", features = [\"cuda\"] }}",
+                        lib_dir.display()
+                    );
+                }
+            }
+        }
     }
 
     // Would require extra source files to pointlessly
@@ -937,7 +962,19 @@ fn main() {
 
     // copy DLLs to target
     if build_shared_libs {
-        let libs_assets = extract_lib_assets(&out_dir);
+        let mut libs_assets = extract_lib_assets(&out_dir);
+        
+        // When using shared GGML, filter out embedded GGML DLLs
+        // (ggml-rs handles copying its own DLLs)
+        if cfg!(feature = "use-shared-ggml") {
+            libs_assets.retain(|asset| {
+                let filename = asset.file_name().unwrap().to_str().unwrap();
+                // Keep llama.dll and other non-GGML DLLs
+                // Filter out ggml*.dll (ggml.dll, ggml-base.dll, ggml-cpu.dll, etc.)
+                !filename.starts_with("ggml")
+            });
+        }
+        
         for asset in libs_assets {
             let asset_clone = asset.clone();
             let filename = asset_clone.file_name().unwrap();
@@ -965,4 +1002,7 @@ fn main() {
             }
         }
     }
+    
+    // Note: When use-shared-ggml is enabled, ggml-rs handles copying its own DLLs.
+    // We don't need to copy GGML DLLs here - each crate copies only what it builds.
 }
