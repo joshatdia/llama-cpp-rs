@@ -606,25 +606,14 @@ fn main() {
         }
         
         // Link to shared ggml libraries from ggml-rs
+        // Only link to base libraries - ggml-rs handles feature-specific libraries
         println!("cargo:rustc-link-lib=dylib=ggml");
         println!("cargo:rustc-link-lib=dylib=ggml-base");
         println!("cargo:rustc-link-lib=dylib=ggml-cpu");
         
-        if matches!(target_os, TargetOs::Apple(_)) {
-            println!("cargo:rustc-link-lib=dylib=ggml-blas");
-        }
-        
-        if cfg!(feature = "vulkan") {
-            println!("cargo:rustc-link-lib=dylib=ggml-vulkan");
-        }
-        
-        if cfg!(feature = "cuda") {
-            println!("cargo:rustc-link-lib=dylib=ggml-cuda");
-        }
-        
-        if cfg!(feature = "metal") {
-            println!("cargo:rustc-link-lib=dylib=ggml-metal");
-        }
+        // Note: Feature-specific libraries (ggml-cuda, ggml-vulkan, ggml-metal, etc.)
+        // are handled by ggml-rs when it's built with those features.
+        // We don't need to link them here to avoid duplicate symbols.
     }
 
     // Would require extra source files to pointlessly
