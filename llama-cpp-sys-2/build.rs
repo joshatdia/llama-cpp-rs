@@ -210,31 +210,14 @@ fn main() {
     let build_shared_libs = cfg!(feature = "dynamic-link");
 
     // Get ggml-rs paths if available (when use-shared-ggml is enabled)
+    let ggml_lib_dir = env::var("DEP_GGML_RS_ROOT")
+        .map(|root| PathBuf::from(root).join("lib"))
+        .ok();
     let ggml_include_dir = env::var("DEP_GGML_RS_INCLUDE")
         .map(PathBuf::from)
-        .ok()
-        .or_else(|| {
-            // Fallback: try to find it from DEP_GGML_RS_ROOT
-            env::var("DEP_GGML_RS_ROOT")
-                .map(|root| PathBuf::from(root).join("include"))
-                .ok()
-        });
-    let ggml_lib_dir = env::var("DEP_GGML_RS_LIB")
-        .map(PathBuf::from)
-        .ok()
-        .or_else(|| {
-            // Fallback: try to find it from DEP_GGML_RS_ROOT
-            env::var("DEP_GGML_RS_ROOT")
-                .map(|root| PathBuf::from(root).join("lib"))
-                .ok()
-        });
+        .ok();
     let ggml_prefix = ggml_lib_dir.as_ref()
-        .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()))
-        .or_else(|| {
-            env::var("DEP_GGML_RS_ROOT")
-                .map(PathBuf::from)
-                .ok()
-        });
+        .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()));
 
     let build_shared_libs = std::env::var("LLAMA_BUILD_SHARED_LIBS")
         .map(|v| v == "1")
@@ -290,37 +273,7 @@ fn main() {
     // Bindings
     let mut bindings_builder = bindgen::Builder::default()
         .header("wrapper.h")
-        .clang_arg(format!("-I{}", llama_src.join("include").display()));
-
-    // When use-shared-ggml is enabled, use ggml-rs headers
-    if cfg!(feature = "use-shared-ggml") {
-        if let Some(ref include_dir) = ggml_include_dir {
-            if include_dir.exists() {
-                bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
-            } else {
-                // Try alternative paths
-                if let Ok(root) = env::var("DEP_GGML_RS_ROOT") {
-                    let alt_include = PathBuf::from(root).join("include");
-                    if alt_include.exists() {
-                        bindings_builder = bindings_builder.clang_arg(format!("-I{}", alt_include.display()));
-                    }
-                }
-            }
-        } else {
-            // Fallback: try to find it from DEP_GGML_RS_ROOT
-            if let Ok(root) = env::var("DEP_GGML_RS_ROOT") {
-                let include_path = PathBuf::from(root).join("include");
-                if include_path.exists() {
-                    bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_path.display()));
-                }
-            }
-        }
-    } else {
-        // Use embedded ggml headers
-        bindings_builder = bindings_builder.clang_arg(format!("-I{}", llama_src.join("ggml/include").display()));
-    }
-
-    let mut bindings_builder = bindings_builder
+        .clang_arg(format!("-I{}", llama_src.join("include").display()))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .derive_partialeq(true)
         .allowlist_function("ggml_.*")
@@ -328,6 +281,16 @@ fn main() {
         .allowlist_function("llama_.*")
         .allowlist_type("llama_.*")
         .prepend_enum_name(false);
+
+    // When use-shared-ggml is enabled, use ggml-rs headers instead of embedded ggml
+    if cfg!(feature = "use-shared-ggml") {
+        if let Some(ref include_dir) = ggml_include_dir {
+            bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
+        }
+    } else {
+        // Use embedded ggml headers
+        bindings_builder = bindings_builder.clang_arg(format!("-I{}", llama_src.join("ggml/include").display()));
+    }
 
     // Configure mtmd feature if enabled
     if cfg!(feature = "mtmd") {
@@ -558,18 +521,14 @@ fn main() {
             }
         }
         
-        // Alternative: If CMake config files aren't in the expected location,
-        // you may need to set additional paths
+        // Set library search path
         if let Some(ref lib_dir) = ggml_lib_dir {
-            if lib_dir.exists() {
-                println!("cargo:rustc-link-search=native={}", lib_dir.display());
-            }
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
         }
+        
+        // Set include directory for CMake
         if let Some(ref include_dir) = ggml_include_dir {
-            if include_dir.exists() {
-                // Add include directory for CMake
-                config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
-            }
+            config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
         }
         
         // Link to shared ggml libraries from ggml-rs
@@ -577,7 +536,7 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=ggml-base");
         println!("cargo:rustc-link-lib=dylib=ggml-cpu");
         
-        if cfg!(target_os = "macos") {
+        if matches!(target_os, TargetOs::Apple(_)) {
             println!("cargo:rustc-link-lib=dylib=ggml-blas");
         }
         
@@ -585,12 +544,12 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib=ggml-vulkan");
         }
         
-        if cfg!(feature = "metal") {
-            println!("cargo:rustc-link-lib=dylib=ggml-metal");
-        }
-        
         if cfg!(feature = "cuda") {
             println!("cargo:rustc-link-lib=dylib=ggml-cuda");
+        }
+        
+        if cfg!(feature = "metal") {
+            println!("cargo:rustc-link-lib=dylib=ggml-metal");
         }
     }
 
