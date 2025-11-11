@@ -60,7 +60,7 @@ include = [
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ggml-sys = { version = "*", optional = true }
+ggml-sys = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
 
 [build-dependencies]
 bindgen = { workspace = true }
