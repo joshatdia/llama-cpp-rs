@@ -415,13 +415,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "ggml-sys"
-version = "0.1.0"
-source = "git+https://github.com/joshatdia/ggml-rs.git?branch=main#7055d16af2a035c92c4640c6014b1adf11973347"
+name = "ggml-rs"
+version = "0.1.1"
+source = "git+https://github.com/joshatdia/ggml-rs.git?branch=main#81e5be4fa2d86800d6068c080d13102ddc6e174e"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
  "cmake",
+ "regex-automata",
 ]
 
 [[package]]
@@ -700,7 +701,7 @@ dependencies = [
  "cc",
  "cmake",
  "find_cuda_helper",
- "ggml-sys",
+ "ggml-rs",
  "glob",
  "walkdir",
 ]

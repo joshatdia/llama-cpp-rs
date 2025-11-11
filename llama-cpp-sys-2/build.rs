@@ -210,14 +210,33 @@ fn main() {
     let build_shared_libs = cfg!(feature = "dynamic-link");
 
     // Get ggml-rs paths if available (when use-shared-ggml is enabled)
-    let ggml_lib_dir = env::var("DEP_GGML_RS_ROOT")
-        .map(|root| PathBuf::from(root).join("lib"))
+    // Note: The ggml-rs crate exports DEP_GGML_* variables (not DEP_GGML_RS_*)
+    // because the crate name is "ggml", not "ggml-rs"
+    let ggml_root = env::var("DEP_GGML_ROOT")
+        .or_else(|_| {
+            // Fallback: try to derive root from DEP_GGML_LIB_DIR
+            env::var("DEP_GGML_LIB_DIR").map(|lib| {
+                let lib_path = PathBuf::from(&lib);
+                lib_path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| lib)
+            })
+        })
         .ok();
-    let ggml_include_dir = env::var("DEP_GGML_RS_INCLUDE")
+    
+    let ggml_lib_dir = env::var("DEP_GGML_LIB_DIR")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            ggml_root.as_ref()
+                .map(|root| PathBuf::from(root).join("lib"))
+        });
+    let ggml_include_dir = env::var("DEP_GGML_INCLUDE")
         .map(PathBuf::from)
         .ok();
-    let ggml_prefix = ggml_lib_dir.as_ref()
-        .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()));
+    let ggml_prefix = ggml_root.as_ref()
+        .map(|root| PathBuf::from(root));
 
     let build_shared_libs = std::env::var("LLAMA_BUILD_SHARED_LIBS")
         .map(|v| v == "1")
@@ -285,26 +304,60 @@ fn main() {
     // When use-shared-ggml is enabled, use ggml-rs headers instead of embedded ggml
     if cfg!(feature = "use-shared-ggml") {
         debug_log!("use-shared-ggml feature is enabled");
-        debug_log!("DEP_GGML_RS_INCLUDE: {:?}", env::var("DEP_GGML_RS_INCLUDE"));
-        debug_log!("DEP_GGML_RS_ROOT: {:?}", env::var("DEP_GGML_RS_ROOT"));
+        
+        // Debug: List all DEP_* environment variables to help diagnose
+        debug_log!("Available DEP_* environment variables:");
+        for (key, value) in env::vars() {
+            if key.starts_with("DEP_") {
+                debug_log!("  {} = {}", key, value);
+            }
+        }
+        
+        debug_log!("DEP_GGML_INCLUDE: {:?}", env::var("DEP_GGML_INCLUDE"));
+        debug_log!("DEP_GGML_ROOT: {:?}", env::var("DEP_GGML_ROOT"));
+        debug_log!("DEP_GGML_LIB_DIR: {:?}", env::var("DEP_GGML_LIB_DIR"));
         debug_log!("ggml_include_dir: {:?}", ggml_include_dir);
+        debug_log!("ggml_lib_dir: {:?}", ggml_lib_dir);
         
         if let Some(ref include_dir) = ggml_include_dir {
             debug_log!("Using ggml-rs include directory: {}", include_dir.display());
             bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
         } else {
-            // Fallback: try to find it from DEP_GGML_RS_ROOT
-            if let Ok(root) = env::var("DEP_GGML_RS_ROOT") {
+            // Fallback: try to find it from DEP_GGML_ROOT
+            if let Ok(root) = env::var("DEP_GGML_ROOT") {
                 let include_path = PathBuf::from(root).join("include");
                 debug_log!("Trying fallback include path: {}", include_path.display());
                 if include_path.exists() {
                     debug_log!("Using fallback include directory: {}", include_path.display());
                     bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_path.display()));
                 } else {
-                    panic!("use-shared-ggml feature is enabled but cannot find ggml-rs headers. DEP_GGML_RS_INCLUDE or DEP_GGML_RS_ROOT/include must be set. Tried: {}", include_path.display());
+                    panic!("use-shared-ggml feature is enabled but cannot find ggml-rs headers. DEP_GGML_INCLUDE or DEP_GGML_ROOT/include must be set. Tried: {}", include_path.display());
                 }
             } else {
-                panic!("use-shared-ggml feature is enabled but DEP_GGML_RS_ROOT is not set. Make sure ggml-rs is properly configured and the dependency is added to Cargo.toml.");
+                // List all available DEP_* variables to help diagnose
+                let mut dep_vars = Vec::new();
+                for (key, value) in env::vars() {
+                    if key.starts_with("DEP_") {
+                        dep_vars.push(format!("  {} = {}", key, value));
+                    }
+                }
+                
+                let dep_vars_str = if dep_vars.is_empty() {
+                    "  (none found)".to_string()
+                } else {
+                    dep_vars.join("\n")
+                };
+                
+                panic!(
+                    "use-shared-ggml feature is enabled but DEP_GGML_ROOT is not set.\n\
+                     Make sure ggml-rs is properly configured and added to [build-dependencies] in Cargo.toml.\n\
+                     \n\
+                     Available DEP_* environment variables:\n\
+                     {}\n\
+                     \n\
+                     Note: The ggml-rs crate exports DEP_GGML_* variables (not DEP_GGML_RS_*).",
+                    dep_vars_str
+                );
             }
         }
     } else {
