@@ -618,6 +618,14 @@ fn main() {
         // Set library search path
         if let Some(ref lib_dir) = ggml_lib_dir {
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            debug_log!("[GGML] Library search path: {}", lib_dir.display());
+            if lib_dir.exists() {
+                debug_log!("[GGML] Library directory exists");
+            } else {
+                eprintln!("cargo:warning=[GGML] Library directory does not exist: {}", lib_dir.display());
+            }
+        } else {
+            eprintln!("cargo:warning=[GGML] Library directory not found. Make sure ggml-rs is built with use-shared-ggml feature.");
         }
         
         // Set include directory for CMake
@@ -630,6 +638,49 @@ fn main() {
         let lib_base_name = ggml_namespace.unwrap_or("ggml");
         
         println!("cargo:warning=[GGML] Linking to GGML libraries with base name: {}", lib_base_name);
+        
+        // Verify base libraries exist before linking
+        if let Some(ref lib_dir) = ggml_lib_dir {
+            if lib_dir.exists() {
+                let base_lib_pattern = if cfg!(windows) {
+                    format!("{}.lib", lib_base_name)
+                } else if cfg!(target_os = "macos") {
+                    format!("lib{}.dylib", lib_base_name)
+                } else {
+                    format!("lib{}.so", lib_base_name)
+                };
+                let base_lib = lib_dir.join(&base_lib_pattern);
+                
+                if !base_lib.exists() {
+                    eprintln!(
+                        "cargo:warning=[GGML] Base library {} not found in {}.\n\
+                         Make sure ggml-rs is built with the namespace-llama feature.\n\
+                         In your Cargo.toml, enable the namespace-llama feature on ggml-rs:\n\
+                         ggml-rs = {{ version = \"...\", features = [\"namespace-llama\", \"cuda\"] }}",
+                        base_lib_pattern,
+                        lib_dir.display()
+                    );
+                    
+                    // List available libraries for debugging
+                    debug_log!("Available libraries in {}:", lib_dir.display());
+                    if let Ok(entries) = std::fs::read_dir(lib_dir) {
+                        for entry in entries.flatten() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                debug_log!("  - {}", name);
+                            }
+                        }
+                    }
+                } else {
+                    debug_log!("Found base library: {}", base_lib.display());
+                }
+            } else {
+                eprintln!(
+                    "cargo:warning=[GGML] Library directory does not exist: {}.\n\
+                     Make sure ggml-rs is built and installed.",
+                    lib_dir.display()
+                );
+            }
+        }
         
         // Link to base libraries
         println!("cargo:rustc-link-lib=dylib={}", lib_base_name);
@@ -1011,7 +1062,8 @@ fn main() {
                 !filename.starts_with("ggml")
             });
             
-            // Copy feature-specific GGML libraries from ggml-rs
+            // Copy ALL namespace-specific GGML libraries from ggml-rs
+            // This ensures all 4 DLLs are copied: base, base-base, base-cpu, base-cuda (if enabled)
             if let Some(ref lib_dir) = ggml_lib_dir {
                 if lib_dir.exists() {
                     let shared_lib_pattern = if cfg!(windows) {
@@ -1023,28 +1075,72 @@ fn main() {
                     };
                     
                     let pattern = lib_dir.join(shared_lib_pattern);
-                    debug_log!("Looking for feature-specific GGML libraries in: {}", pattern.display());
+                    debug_log!("Looking for namespace-specific GGML libraries in: {}", pattern.display());
                     
+                    // List of libraries to copy based on namespace
+                    let base_lib = lib_base_name.to_string();
+                    let base_base_lib = format!("{}-base", lib_base_name);
+                    let base_cpu_lib = format!("{}-cpu", lib_base_name);
+                    let libraries_to_copy = vec![
+                        &base_lib,      // e.g., ggml_llama
+                        &base_base_lib, // e.g., ggml_llama-base
+                        &base_cpu_lib,  // e.g., ggml_llama-cpu
+                    ];
+                    
+                    // Add feature-specific libraries if enabled
+                    let mut feature_libs = Vec::new();
+                    if cfg!(feature = "cuda") {
+                        feature_libs.push(format!("{}-cuda", lib_base_name));
+                    }
+                    if cfg!(feature = "vulkan") {
+                        feature_libs.push(format!("{}-vulkan", lib_base_name));
+                    }
+                    if cfg!(feature = "metal") {
+                        feature_libs.push(format!("{}-metal", lib_base_name));
+                    }
+                    
+                    let mut copied_count = 0;
                     for entry in glob(pattern.to_str().unwrap()).unwrap() {
                         match entry {
                             Ok(path) => {
                                 let filename = path.file_name().unwrap().to_str().unwrap();
-                                // Only copy feature-specific libraries when their features are enabled
-                                // Base libraries (ggml, ggml-base, ggml-cpu) are already handled by ggml-rs
-                                // Check for namespace-aware names (e.g., ggml_llama-cuda.dll or ggml-cuda.dll)
-                                let should_copy = (cfg!(feature = "cuda") && filename.contains(&format!("{}-cuda", lib_base_name)))
-                                    || (cfg!(feature = "vulkan") && filename.contains(&format!("{}-vulkan", lib_base_name)))
-                                    || (cfg!(feature = "metal") && filename.contains(&format!("{}-metal", lib_base_name)));
+                                
+                                // Check if this is a namespace-specific library we need to copy
+                                let should_copy = libraries_to_copy.iter().any(|lib_name| {
+                                    if cfg!(windows) {
+                                        filename == format!("{}.dll", lib_name) || filename == format!("{}.lib", lib_name)
+                                    } else if cfg!(target_os = "macos") {
+                                        filename == format!("lib{}.dylib", lib_name)
+                                    } else {
+                                        filename == format!("lib{}.so", lib_name)
+                                    }
+                                }) || feature_libs.iter().any(|lib_name| {
+                                    if cfg!(windows) {
+                                        filename == format!("{}.dll", lib_name) || filename == format!("{}.lib", lib_name)
+                                    } else if cfg!(target_os = "macos") {
+                                        filename == format!("lib{}.dylib", lib_name)
+                                    } else {
+                                        filename == format!("lib{}.so", lib_name)
+                                    }
+                                });
                                 
                                 if should_copy {
-                                    debug_log!("Found feature-specific GGML library: {}", path.display());
+                                    println!("cargo:warning=[GGML] Copying namespace-specific library: {}", filename);
+                                    debug_log!("Found namespace-specific GGML library: {}", path.display());
                                     libs_assets.push(path);
+                                    copied_count += 1;
                                 }
                             }
                             Err(e) => debug_log!("Error globbing for GGML libraries: {}", e),
                         }
                     }
+                    
+                    println!("cargo:warning=[GGML] Copied {} namespace-specific GGML libraries", copied_count);
+                } else {
+                    eprintln!("cargo:warning=[GGML] Library directory does not exist: {}", lib_dir.display());
                 }
+            } else {
+                eprintln!("cargo:warning=[GGML] Library directory not found. Make sure ggml-rs is built with namespace-llama feature.");
             }
         }
         
