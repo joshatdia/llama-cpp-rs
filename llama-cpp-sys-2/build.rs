@@ -209,9 +209,9 @@ fn main() {
     let llama_src = Path::new(&manifest_dir).join("llama.cpp");
     let build_shared_libs = cfg!(feature = "dynamic-link");
 
-    // Determine namespace for use-shared-ggml
-    // This repo always uses ggml_llama namespace when use-shared-ggml is enabled
-    let ggml_namespace = if cfg!(feature = "namespace-llama") || cfg!(feature = "use-shared-ggml") {
+    // When use-shared-ggml is enabled, we always use ggml_llama namespace
+    // Both variants (whisper and llama) are always built by ggml-rs, so no feature flags needed
+    let ggml_namespace = if cfg!(feature = "use-shared-ggml") {
         Some("ggml_llama")
     } else {
         None  // Default: no namespace (for backward compatibility when not using shared GGML)
@@ -220,45 +220,33 @@ fn main() {
     if let Some(ns) = ggml_namespace {
         println!("cargo:warning=[GGML] Using namespaced GGML libraries: {}", ns);
         debug_log!("Using GGML namespace: {}", ns);
-    } else if cfg!(feature = "use-shared-ggml") {
-        // This shouldn't happen since use-shared-ggml auto-enables namespace-llama
-        println!("cargo:warning=[GGML] WARNING: use-shared-ggml is enabled but namespace-llama is not set");
-        debug_log!("WARNING: use-shared-ggml is enabled but namespace-llama is not set");
     }
 
-    // Get ggml-rs paths if available (when use-shared-ggml is enabled)
-    // Try both DEP_GGML_* and DEP_GGML_RS_* variable names for compatibility
-    // Note: The actual crate name is "ggml", so it exports DEP_GGML_* variables
-    let ggml_root = env::var("DEP_GGML_ROOT")
-        .or_else(|_| env::var("DEP_GGML_RS_ROOT"))
-        .or_else(|_| {
-            // Fallback: try to derive root from DEP_GGML_LIB_DIR
-            env::var("DEP_GGML_LIB_DIR")
-                .or_else(|_| env::var("DEP_GGML_RS_LIB_DIR"))
-                .map(|lib| {
-                    let lib_path = PathBuf::from(&lib);
-                    lib_path
-                        .parent()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|| lib)
-                })
-        })
+    // Get ggml-rs paths using the new DEP_GGML_RS_GGML_LLAMA_* environment variables
+    // These are exported by ggml-rs when both variants are built
+    let ggml_lib_dir = env::var("DEP_GGML_RS_GGML_LLAMA_LIB_DIR")
+        .map(PathBuf::from)
         .ok();
+    // Note: ggml_bin_dir is available but typically same as lib_dir on Windows
+    // We use lib_dir for both library and DLL paths
+    let _ggml_bin_dir = env::var("DEP_GGML_RS_GGML_LLAMA_BIN_DIR")
+        .map(PathBuf::from)
+        .ok();
+    let ggml_basename = env::var("DEP_GGML_RS_GGML_LLAMA_BASENAME")
+        .unwrap_or_else(|_| "ggml_llama".to_string());
     
-    let ggml_lib_dir = env::var("DEP_GGML_LIB_DIR")
-        .or_else(|_| env::var("DEP_GGML_RS_LIB_DIR"))
+    // Derive prefix from lib_dir (go up from lib/ to root)
+    let ggml_prefix = ggml_lib_dir.as_ref()
+        .and_then(|lib| lib.parent().map(|p| p.to_path_buf()));
+    
+    // Try to find include directory - may be in DEP_GGML_RS_GGML_LLAMA_INCLUDE or derived from prefix
+    let ggml_include_dir = env::var("DEP_GGML_RS_GGML_LLAMA_INCLUDE")
         .map(PathBuf::from)
         .ok()
         .or_else(|| {
-            ggml_root.as_ref()
-                .map(|root| PathBuf::from(root).join("lib"))
+            ggml_prefix.as_ref()
+                .map(|prefix| prefix.join("include"))
         });
-    let ggml_include_dir = env::var("DEP_GGML_INCLUDE")
-        .or_else(|_| env::var("DEP_GGML_RS_INCLUDE"))
-        .map(PathBuf::from)
-        .ok();
-    let ggml_prefix = ggml_root.as_ref()
-        .map(|root| PathBuf::from(root));
 
     let build_shared_libs = std::env::var("LLAMA_BUILD_SHARED_LIBS")
         .map(|v| v == "1")
@@ -335,52 +323,42 @@ fn main() {
             }
         }
         
-        debug_log!("DEP_GGML_INCLUDE: {:?}", env::var("DEP_GGML_INCLUDE"));
-        debug_log!("DEP_GGML_ROOT: {:?}", env::var("DEP_GGML_ROOT"));
-        debug_log!("DEP_GGML_LIB_DIR: {:?}", env::var("DEP_GGML_LIB_DIR"));
+        debug_log!("DEP_GGML_RS_GGML_LLAMA_LIB_DIR: {:?}", env::var("DEP_GGML_RS_GGML_LLAMA_LIB_DIR"));
+        debug_log!("DEP_GGML_RS_GGML_LLAMA_BIN_DIR: {:?}", env::var("DEP_GGML_RS_GGML_LLAMA_BIN_DIR"));
+        debug_log!("DEP_GGML_RS_GGML_LLAMA_BASENAME: {:?}", env::var("DEP_GGML_RS_GGML_LLAMA_BASENAME"));
+        debug_log!("DEP_GGML_RS_GGML_LLAMA_INCLUDE: {:?}", env::var("DEP_GGML_RS_GGML_LLAMA_INCLUDE"));
         debug_log!("ggml_include_dir: {:?}", ggml_include_dir);
         debug_log!("ggml_lib_dir: {:?}", ggml_lib_dir);
+        debug_log!("ggml_basename: {}", ggml_basename);
         
         if let Some(ref include_dir) = ggml_include_dir {
             debug_log!("Using ggml-rs include directory: {}", include_dir.display());
             bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
         } else {
-            // Fallback: try to find it from DEP_GGML_ROOT
-            if let Ok(root) = env::var("DEP_GGML_ROOT") {
-                let include_path = PathBuf::from(root).join("include");
-                debug_log!("Trying fallback include path: {}", include_path.display());
-                if include_path.exists() {
-                    debug_log!("Using fallback include directory: {}", include_path.display());
-                    bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_path.display()));
-                } else {
-                    panic!("use-shared-ggml feature is enabled but cannot find ggml-rs headers. DEP_GGML_INCLUDE or DEP_GGML_ROOT/include must be set. Tried: {}", include_path.display());
+            // List all available DEP_* variables to help diagnose
+            let mut dep_vars = Vec::new();
+            for (key, value) in env::vars() {
+                if key.starts_with("DEP_GGML_RS_GGML_LLAMA") {
+                    dep_vars.push(format!("  {} = {}", key, value));
                 }
-            } else {
-                // List all available DEP_* variables to help diagnose
-                let mut dep_vars = Vec::new();
-                for (key, value) in env::vars() {
-                    if key.starts_with("DEP_") {
-                        dep_vars.push(format!("  {} = {}", key, value));
-                    }
-                }
-                
-                let dep_vars_str = if dep_vars.is_empty() {
-                    "  (none found)".to_string()
-                } else {
-                    dep_vars.join("\n")
-                };
-                
-                panic!(
-                    "use-shared-ggml feature is enabled but DEP_GGML_ROOT is not set.\n\
-                     Make sure ggml-rs is properly configured and added to [build-dependencies] in Cargo.toml.\n\
-                     \n\
-                     Available DEP_* environment variables:\n\
-                     {}\n\
-                     \n\
-                     Note: The ggml-rs crate exports DEP_GGML_* variables (not DEP_GGML_RS_*).",
-                    dep_vars_str
-                );
             }
+            
+            let dep_vars_str = if dep_vars.is_empty() {
+                "  (none found)".to_string()
+            } else {
+                dep_vars.join("\n")
+            };
+            
+            panic!(
+                "use-shared-ggml feature is enabled but cannot find ggml-rs headers.\n\
+                 Make sure ggml-rs is properly configured and added to [build-dependencies] in Cargo.toml.\n\
+                 \n\
+                 Expected DEP_GGML_RS_GGML_LLAMA_* environment variables:\n\
+                 {}\n\
+                 \n\
+                 Note: ggml-rs exports DEP_GGML_RS_GGML_LLAMA_* variables when both variants are built.",
+                dep_vars_str
+            );
         }
     } else {
         // Use embedded ggml headers
@@ -606,9 +584,9 @@ fn main() {
         // Tell CMake to use system ggml instead of building it
         config.define("LLAMA_USE_SYSTEM_GGML", "ON");
         
-        // Determine library base name based on namespace
-        // When use-shared-ggml is enabled, we always use ggml_llama namespace
-        let lib_base_name = ggml_namespace.expect("use-shared-ggml requires namespace-llama to be set (should be automatic)");
+        // Use the basename from ggml-rs environment variable
+        // This should be "ggml_llama" when use-shared-ggml is enabled
+        let lib_base_name = &ggml_basename;
         
         // CRITICAL: Tell CMake where to find ggml
         // Since we're using namespaced libraries, we need to manually set the library path
@@ -721,7 +699,7 @@ fn main() {
                 } else {
                     eprintln!(
                         "cargo:warning=[GGML] Namespaced library {} not found in {}.\n\
-                         Make sure ggml-rs is built with the namespace-llama feature.",
+                         Make sure ggml-rs is properly built and exports DEP_GGML_RS_GGML_LLAMA_* variables.",
                         ggml_lib_name,
                         lib_dir.display()
                     );
@@ -755,9 +733,8 @@ fn main() {
                 if !base_lib.exists() {
                     eprintln!(
                         "cargo:warning=[GGML] Base library {} not found in {}.\n\
-                         Make sure ggml-rs is built with the namespace-llama feature.\n\
-                         In your Cargo.toml, enable the namespace-llama feature on ggml-rs:\n\
-                         ggml-rs = {{ version = \"...\", features = [\"namespace-llama\", \"cuda\"] }}",
+                         Make sure ggml-rs is properly built and exports DEP_GGML_RS_GGML_LLAMA_* variables.\n\
+                         Both variants (whisper and llama) are always built by ggml-rs, so no feature flags are needed.",
                         base_lib_pattern,
                         lib_dir.display()
                     );
@@ -1141,9 +1118,9 @@ fn main() {
         // When using shared GGML, filter out embedded GGML DLLs
         // (ggml-rs handles copying its own DLLs)
         if cfg!(feature = "use-shared-ggml") {
-            // Determine library base name based on namespace
-            // When use-shared-ggml is enabled, we always use ggml_llama namespace
-            let lib_base_name = ggml_namespace.expect("use-shared-ggml requires namespace-llama to be set (should be automatic)");
+            // Use the basename from ggml-rs environment variable
+            // This should be "ggml_llama" when use-shared-ggml is enabled
+            let lib_base_name = &ggml_basename;
             
             libs_assets.retain(|asset| {
                 let filename = asset.file_name().unwrap().to_str().unwrap();
@@ -1234,7 +1211,7 @@ fn main() {
                     eprintln!("cargo:warning=[GGML] Library directory does not exist: {}", lib_dir.display());
                 }
             } else {
-                eprintln!("cargo:warning=[GGML] Library directory not found. Make sure ggml-rs is built with namespace-llama feature.");
+                eprintln!("cargo:warning=[GGML] Library directory not found. Make sure ggml-rs is properly built and exports DEP_GGML_RS_GGML_LLAMA_* variables.");
             }
         }
         
