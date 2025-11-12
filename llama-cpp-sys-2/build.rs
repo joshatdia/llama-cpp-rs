@@ -841,8 +841,28 @@ fn main() {
             }
         }
         
-        // Note: ggml-rs handles linking automatically, so we don't need to link here.
-        // We only need to set the library search path (already done above) and copy DLLs (done below).
+        // Link to namespaced GGML libraries explicitly
+        // Note: Even though the guide says ggml-rs handles linking, we need to explicitly
+        // link to the namespaced libraries so the linker can find the symbols
+        println!("cargo:rustc-link-lib=dylib={}", lib_base_name);
+        println!("cargo:rustc-link-lib=dylib={}-base", lib_base_name);
+        println!("cargo:rustc-link-lib=dylib={}-cpu", lib_base_name);
+        
+        // Link to feature-specific libraries when enabled
+        if cfg!(feature = "cuda") {
+            println!("cargo:rustc-link-lib=dylib={}-cuda", lib_base_name);
+        }
+        
+        if cfg!(feature = "vulkan") {
+            println!("cargo:rustc-link-lib=dylib={}-vulkan", lib_base_name);
+        }
+        
+        if cfg!(feature = "metal") {
+            println!("cargo:rustc-link-lib=dylib={}-metal", lib_base_name);
+        }
+        
+        println!("cargo:warning=[GGML] Linked to namespaced GGML libraries: {}, {}-base, {}-cpu", 
+                 lib_base_name, lib_base_name, lib_base_name);
     }
 
     // Would require extra source files to pointlessly
