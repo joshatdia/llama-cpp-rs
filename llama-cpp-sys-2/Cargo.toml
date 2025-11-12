@@ -89,7 +89,6 @@ mtmd = []
 # Use shared GGML backend to avoid duplicate symbol conflicts
 # When use-shared-ggml is enabled, automatically use namespace-llama to avoid conflicts
 use-shared-ggml = ["ggml-rs", "namespace-llama"]
-# Namespace features - only one should be enabled per dependent crate
-# These pass through to ggml-rs to enable symbol namespacing
+# Namespace feature - passes through to ggml-rs to enable symbol namespacing
+# This repo always uses ggml_llama namespace when use-shared-ggml is enabled
 namespace-llama = ["ggml-rs?/namespace-llama"]
-namespace-whisper = ["ggml-rs?/namespace-whisper"]

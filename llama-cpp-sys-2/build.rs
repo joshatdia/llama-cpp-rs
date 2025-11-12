@@ -209,24 +209,21 @@ fn main() {
     let llama_src = Path::new(&manifest_dir).join("llama.cpp");
     let build_shared_libs = cfg!(feature = "dynamic-link");
 
-    // Determine namespace based on features (for use-shared-ggml)
-    // This determines the library name prefix when using namespaced GGML
-    let ggml_namespace = if cfg!(feature = "namespace-llama") {
+    // Determine namespace for use-shared-ggml
+    // This repo always uses ggml_llama namespace when use-shared-ggml is enabled
+    let ggml_namespace = if cfg!(feature = "namespace-llama") || cfg!(feature = "use-shared-ggml") {
         Some("ggml_llama")
-    } else if cfg!(feature = "namespace-whisper") {
-        Some("ggml_whisper")
     } else {
-        None  // Default: no namespace (for backward compatibility)
+        None  // Default: no namespace (for backward compatibility when not using shared GGML)
     };
 
     if let Some(ns) = ggml_namespace {
         println!("cargo:warning=[GGML] Using namespaced GGML libraries: {}", ns);
         debug_log!("Using GGML namespace: {}", ns);
     } else if cfg!(feature = "use-shared-ggml") {
-        println!("cargo:warning=[GGML] No namespace specified - using default GGML symbols");
-        println!("cargo:warning=[GGML] WARNING: If using with both llama.cpp and whisper.cpp, enable namespace-llama or namespace-whisper");
-        debug_log!("No namespace specified - using default GGML symbols");
-        debug_log!("WARNING: If using with both llama.cpp and whisper.cpp, enable namespace-llama or namespace-whisper");
+        // This shouldn't happen since use-shared-ggml auto-enables namespace-llama
+        println!("cargo:warning=[GGML] WARNING: use-shared-ggml is enabled but namespace-llama is not set");
+        debug_log!("WARNING: use-shared-ggml is enabled but namespace-llama is not set");
     }
 
     // Get ggml-rs paths if available (when use-shared-ggml is enabled)
@@ -610,7 +607,8 @@ fn main() {
         config.define("LLAMA_USE_SYSTEM_GGML", "ON");
         
         // Determine library base name based on namespace
-        let lib_base_name = ggml_namespace.unwrap_or("ggml");
+        // When use-shared-ggml is enabled, we always use ggml_llama namespace
+        let lib_base_name = ggml_namespace.expect("use-shared-ggml requires namespace-llama to be set (should be automatic)");
         
         // CRITICAL: Tell CMake where to find ggml
         // Since we're using namespaced libraries, we need to manually set the library path
@@ -717,57 +715,9 @@ fn main() {
                     config.define("GGML_LIBRARY:FILEPATH", ggml_lib_path.to_str().unwrap());
                     println!("cargo:warning=[GGML] Setting GGML_LIBRARY to: {}", ggml_lib_path.display());
                     
-                    // Also create fallback libraries for component libraries if using namespace
-                    // This is a backup in case the patching doesn't work completely
-                    if ggml_namespace.is_some() {
-                        let component_libs = vec!["base", "cpu"];
-                        let mut feature_components = Vec::new();
-                        if cfg!(feature = "cuda") {
-                            feature_components.push("cuda");
-                        }
-                        if cfg!(feature = "vulkan") {
-                            feature_components.push("vulkan");
-                        }
-                        if cfg!(feature = "metal") {
-                            feature_components.push("metal");
-                        }
-                        
-                        for component in component_libs.iter().chain(feature_components.iter()) {
-                            let namespaced_lib_name = if cfg!(windows) {
-                                format!("{}-{}.lib", lib_base_name, component)
-                            } else if cfg!(target_os = "macos") {
-                                format!("lib{}-{}.dylib", lib_base_name, component)
-                            } else {
-                                format!("lib{}-{}.so", lib_base_name, component)
-                            };
-                            let namespaced_lib_path = lib_dir.join(&namespaced_lib_name);
-                            
-                            if namespaced_lib_path.exists() {
-                                let fallback_lib_name = if cfg!(windows) {
-                                    format!("ggml-{}.lib", component)
-                                } else if cfg!(target_os = "macos") {
-                                    format!("libggml-{}.dylib", component)
-                                } else {
-                                    format!("libggml-{}.so", component)
-                                };
-                                let fallback_lib_path = lib_dir.join(&fallback_lib_name);
-                                
-                                if !fallback_lib_path.exists() {
-                                    // Try to create a hard link (works on Windows and Unix)
-                                    if let Err(e) = std::fs::hard_link(&namespaced_lib_path, &fallback_lib_path) {
-                                        // If hard link fails, try copy (for cross-filesystem scenarios)
-                                        if let Err(e2) = std::fs::copy(&namespaced_lib_path, &fallback_lib_path) {
-                                            debug_log!("Could not create fallback library {}: {} / {}", fallback_lib_name, e, e2);
-                                        } else {
-                                            debug_log!("Created fallback library: {} -> {}", fallback_lib_name, namespaced_lib_path.display());
-                                        }
-                                    } else {
-                                        debug_log!("Created fallback library link: {} -> {}", fallback_lib_name, namespaced_lib_path.display());
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // Note: We no longer create fallback libraries with generic "ggml" names
+                    // because we patch ggml-config.cmake to use the namespaced library names directly.
+                    // This ensures complete separation between llama and whisper builds.
                 } else {
                     eprintln!(
                         "cargo:warning=[GGML] Namespaced library {} not found in {}.\n\
@@ -1192,13 +1142,14 @@ fn main() {
         // (ggml-rs handles copying its own DLLs)
         if cfg!(feature = "use-shared-ggml") {
             // Determine library base name based on namespace
-            let lib_base_name = ggml_namespace.unwrap_or("ggml");
+            // When use-shared-ggml is enabled, we always use ggml_llama namespace
+            let lib_base_name = ggml_namespace.expect("use-shared-ggml requires namespace-llama to be set (should be automatic)");
             
             libs_assets.retain(|asset| {
                 let filename = asset.file_name().unwrap().to_str().unwrap();
                 // Keep llama.dll and other non-GGML DLLs
                 // Filter out ggml*.dll (ggml.dll, ggml-base.dll, ggml-cpu.dll, etc.)
-                // Also filter out namespace-aware names (ggml_llama*.dll, ggml_whisper*.dll)
+                // Also filter out namespace-aware names (ggml_llama*.dll)
                 !filename.starts_with("ggml")
             });
             
