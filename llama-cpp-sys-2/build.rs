@@ -609,11 +609,17 @@ fn main() {
         // Tell CMake to use system ggml instead of building it
         config.define("LLAMA_USE_SYSTEM_GGML", "ON");
         
+        // Determine library base name based on namespace
+        let lib_base_name = ggml_namespace.unwrap_or("ggml");
+        
         // CRITICAL: Tell CMake where to find ggml
+        // Since we're using namespaced libraries, we need to manually set the library path
+        // instead of relying on ggml-config.cmake which looks for "ggml" instead of "ggml_llama"
         if let Some(ref prefix) = ggml_prefix {
             // Set CMAKE_PREFIX_PATH to where ggml-rs installed ggml
             config.define("CMAKE_PREFIX_PATH", prefix.to_str().unwrap());
-            // Set ggml_DIR to the cmake config directory
+            
+            // Try to use ggml-config.cmake if it exists, but we'll override the library name
             let ggml_cmake_dir = prefix.join("lib").join("cmake").join("ggml");
             if ggml_cmake_dir.exists() {
                 config.define("ggml_DIR", ggml_cmake_dir.to_str().unwrap());
@@ -626,6 +632,63 @@ fn main() {
             debug_log!("[GGML] Library search path: {}", lib_dir.display());
             if lib_dir.exists() {
                 debug_log!("[GGML] Library directory exists");
+                
+                // Manually set the namespaced library path for CMake
+                // This overrides what ggml-config.cmake looks for
+                let ggml_lib_name = if cfg!(windows) {
+                    format!("{}.lib", lib_base_name)
+                } else if cfg!(target_os = "macos") {
+                    format!("lib{}.dylib", lib_base_name)
+                } else {
+                    format!("lib{}.so", lib_base_name)
+                };
+                let ggml_lib_path = lib_dir.join(&ggml_lib_name);
+                
+                if ggml_lib_path.exists() {
+                    // Workaround: ggml-config.cmake looks for "ggml.lib" but we have "ggml_llama.lib"
+                    // Create a temporary symlink/copy so find_library can find it
+                    let ggml_fallback_name = if cfg!(windows) {
+                        "ggml.lib"
+                    } else if cfg!(target_os = "macos") {
+                        "libggml.dylib"
+                    } else {
+                        "libggml.so"
+                    };
+                    let ggml_fallback_path = lib_dir.join(ggml_fallback_name);
+                    
+                    // Only create fallback if it doesn't exist and we're using a namespace
+                    if ggml_namespace.is_some() && !ggml_fallback_path.exists() {
+                        // Try to create a hard link (works on Windows and Unix)
+                        if let Err(e) = std::fs::hard_link(&ggml_lib_path, &ggml_fallback_path) {
+                            // If hard link fails, try copy (for cross-filesystem scenarios)
+                            if let Err(e2) = std::fs::copy(&ggml_lib_path, &ggml_fallback_path) {
+                                eprintln!(
+                                    "cargo:warning=[GGML] Could not create fallback library {}: {} (hard link) / {} (copy).\n\
+                                     CMake may fail to find the library.",
+                                    ggml_fallback_name, e, e2
+                                );
+                            } else {
+                                println!("cargo:warning=[GGML] Created fallback library: {} -> {}", ggml_fallback_name, ggml_lib_path.display());
+                            }
+                        } else {
+                            println!("cargo:warning=[GGML] Created fallback library link: {} -> {}", ggml_fallback_name, ggml_lib_path.display());
+                        }
+                    }
+                    
+                    // Set the library path directly for CMake as a cache variable
+                    // This will be used by find_library in ggml-config.cmake
+                    config.define("GGML_LIBRARY", ggml_lib_path.to_str().unwrap());
+                    // Also set it as a cache variable so find_library will use it
+                    config.define("GGML_LIBRARY:FILEPATH", ggml_lib_path.to_str().unwrap());
+                    println!("cargo:warning=[GGML] Setting GGML_LIBRARY to: {}", ggml_lib_path.display());
+                } else {
+                    eprintln!(
+                        "cargo:warning=[GGML] Namespaced library {} not found in {}.\n\
+                         Make sure ggml-rs is built with the namespace-llama feature.",
+                        ggml_lib_name,
+                        lib_dir.display()
+                    );
+                }
             } else {
                 eprintln!("cargo:warning=[GGML] Library directory does not exist: {}", lib_dir.display());
             }
@@ -637,11 +700,6 @@ fn main() {
         if let Some(ref include_dir) = ggml_include_dir {
             config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
         }
-        
-        // Note: According to the guide, ggml-rs handles all linking automatically.
-        // However, we still need to set the library search path for CMake and DLL copying.
-        // Determine library base name based on namespace for DLL copying
-        let lib_base_name = ggml_namespace.unwrap_or("ggml");
         
         println!("cargo:warning=[GGML] Using namespace-specific GGML libraries with base name: {}", lib_base_name);
         
