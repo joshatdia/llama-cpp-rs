@@ -595,75 +595,22 @@ fn main() {
             // Set CMAKE_PREFIX_PATH to where ggml-rs installed ggml
             config.define("CMAKE_PREFIX_PATH", prefix.to_str().unwrap());
             
-            // Try to use ggml-config.cmake if it exists, but we'll patch it for namespaced libraries
+            // CRITICAL: Do NOT patch ggml-config.cmake here - let ggml-rs handle all patching
+            // ggml-rs has comprehensive logic to:
+            // 1. Deduplicate GGML_AVAILABLE_BACKENDS
+            // 2. Remove duplicate add_library blocks
+            // 3. Add if(NOT TARGET ...) guards
+            // 4. Replace library names with namespaced versions
+            //
+            // If we patch here after ggml-rs, we:
+            // - Overwrite the deduplication work
+            // - Potentially create new duplicates
+            // - Cause CMake errors about duplicate targets
             let ggml_cmake_dir = prefix.join("lib").join("cmake").join("ggml");
             if ggml_cmake_dir.exists() {
                 config.define("ggml_DIR", ggml_cmake_dir.to_str().unwrap());
-                
-                // Patch ggml-config.cmake to use namespaced library names
-                // This is necessary because ggml-config.cmake looks for "ggml", "ggml-base", etc.
-                // but we have "ggml_llama", "ggml_llama-base", etc.
-                if let Some(ref namespace) = ggml_namespace {
-                    let ggml_config_path = ggml_cmake_dir.join("ggml-config.cmake");
-                    if ggml_config_path.exists() {
-                        match std::fs::read_to_string(&ggml_config_path) {
-                            Ok(config_content) => {
-                                // Replace all library name references with namespaced versions
-                                // The pattern in ggml-config.cmake is:
-                                //   find_library(GGML_LIBRARY ggml
-                                //   find_library(GGML_BASE_LIBRARY ggml-base
-                                //   find_library(${_ggml_backend_pfx}_LIBRARY ${_ggml_backend}
-                                // where ${_ggml_backend} can be ggml-cpu, ggml-cuda, etc.
-                                // Replace all library name references with namespaced versions
-                                // Order matters: replace specific patterns first, then general ones
-                                let mut patched = config_content.clone();
-                                
-                                // Replace specific find_library calls first (most specific patterns)
-                                patched = patched.replace(
-                                    "find_library(GGML_BASE_LIBRARY ggml-base",
-                                    &format!("find_library(GGML_BASE_LIBRARY {}-base", namespace)
-                                );
-                                patched = patched.replace(
-                                    "find_library(GGML_LIBRARY ggml",
-                                    &format!("find_library(GGML_LIBRARY {}", namespace)
-                                );
-                                
-                                // Replace component library names in backend lists and variables
-                                // These appear in GGML_AVAILABLE_BACKENDS and ${_ggml_backend} usage
-                                patched = patched.replace("ggml-cpu", &format!("{}-cpu", namespace));
-                                patched = patched.replace("ggml-cuda", &format!("{}-cuda", namespace));
-                                patched = patched.replace("ggml-vulkan", &format!("{}-vulkan", namespace));
-                                patched = patched.replace("ggml-metal", &format!("{}-metal", namespace));
-                                
-                                // Replace quoted library names (for safety)
-                                patched = patched.replace("\"ggml\"", &format!("\"{}\"", namespace));
-                                patched = patched.replace("'ggml'", &format!("'{}'", namespace));
-                                patched = patched.replace("\"ggml-base\"", &format!("\"{}-base\"", namespace));
-                                patched = patched.replace("'ggml-base'", &format!("'{}-base'", namespace));
-                                
-                                if patched != config_content {
-                                    if let Err(e) = std::fs::write(&ggml_config_path, &patched) {
-                                        eprintln!(
-                                            "cargo:warning=[GGML] Failed to patch ggml-config.cmake: {}\n\
-                                             CMake may fail to find namespaced libraries.",
-                                            e
-                                        );
-                                    } else {
-                                        println!("cargo:warning=[GGML] Patched ggml-config.cmake to use namespaced library: {}", namespace);
-                                        debug_log!("Patched ggml-config.cmake: {} -> {}", "ggml", namespace);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "cargo:warning=[GGML] Could not read ggml-config.cmake to patch: {}\n\
-                                     CMake may fail to find namespaced libraries.",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
+                println!("cargo:warning=[GGML] Using ggml-config.cmake from ggml-rs (pre-patched with namespace: {})", 
+                    ggml_namespace.as_deref().unwrap_or("unknown"));
             }
         }
         
