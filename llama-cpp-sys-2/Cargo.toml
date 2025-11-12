@@ -72,20 +72,24 @@ walkdir = "2"
 ggml-rs = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
 
 [features]
-cuda = []
+# When use-shared-ggml is enabled, propagate features to ggml-rs
+# This ensures that when you enable cuda/metal/vulkan on llama-cpp-rs,
+# it also enables the corresponding feature on ggml-rs
+cuda = ["ggml-rs?/cuda"]
 # Disables the need to dynamically link against libcuda.so / cuda.dll
 cuda-no-vmm = ["cuda"]
-metal = []
+metal = ["ggml-rs?/metal"]
 dynamic-link = []
-vulkan = []
+vulkan = ["ggml-rs?/vulkan"]
 native = []
 openmp = []
 # Only has an impact on Android.
 shared-stdcxx = []
 mtmd = []
 # Use shared GGML backend to avoid duplicate symbol conflicts
-use-shared-ggml = ["ggml-rs"]
-# Feature combinations: when use-shared-ggml is enabled, propagate features to ggml-rs
-# Note: Parent crates can enable these combinations, or enable features on ggml-rs directly
-# Example: cargo build --features use-shared-ggml,cuda
-# Or in Cargo.toml: ggml-rs = { version = "...", features = ["cuda"] }
+# When use-shared-ggml is enabled, automatically use namespace-llama to avoid conflicts
+use-shared-ggml = ["ggml-rs", "namespace-llama"]
+# Namespace features - only one should be enabled per dependent crate
+# These pass through to ggml-rs to enable symbol namespacing
+namespace-llama = ["ggml-rs?/namespace-llama"]
+namespace-whisper = ["ggml-rs?/namespace-whisper"]

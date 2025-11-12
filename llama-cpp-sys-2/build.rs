@@ -209,6 +209,26 @@ fn main() {
     let llama_src = Path::new(&manifest_dir).join("llama.cpp");
     let build_shared_libs = cfg!(feature = "dynamic-link");
 
+    // Determine namespace based on features (for use-shared-ggml)
+    // This determines the library name prefix when using namespaced GGML
+    let ggml_namespace = if cfg!(feature = "namespace-llama") {
+        Some("ggml_llama")
+    } else if cfg!(feature = "namespace-whisper") {
+        Some("ggml_whisper")
+    } else {
+        None  // Default: no namespace (for backward compatibility)
+    };
+
+    if let Some(ns) = ggml_namespace {
+        println!("cargo:warning=[GGML] Using namespaced GGML libraries: {}", ns);
+        debug_log!("Using GGML namespace: {}", ns);
+    } else if cfg!(feature = "use-shared-ggml") {
+        println!("cargo:warning=[GGML] No namespace specified - using default GGML symbols");
+        println!("cargo:warning=[GGML] WARNING: If using with both llama.cpp and whisper.cpp, enable namespace-llama or namespace-whisper");
+        debug_log!("No namespace specified - using default GGML symbols");
+        debug_log!("WARNING: If using with both llama.cpp and whisper.cpp, enable namespace-llama or namespace-whisper");
+    }
+
     // Get ggml-rs paths if available (when use-shared-ggml is enabled)
     // Note: The ggml-rs crate exports DEP_GGML_* variables (not DEP_GGML_RS_*)
     // because the crate name is "ggml", not "ggml-rs"
@@ -606,38 +626,51 @@ fn main() {
         }
         
         // Link to shared ggml libraries from ggml-rs
-        // Only link to base libraries - ggml-rs handles feature-specific libraries
-        println!("cargo:rustc-link-lib=dylib=ggml");
-        println!("cargo:rustc-link-lib=dylib=ggml-base");
-        println!("cargo:rustc-link-lib=dylib=ggml-cpu");
+        // Determine library base name based on namespace
+        let lib_base_name = ggml_namespace.unwrap_or("ggml");
         
-        // Note: Feature-specific libraries (ggml-cuda, ggml-vulkan, ggml-metal, etc.)
-        // are handled by ggml-rs when it's built with those features.
-        // We don't need to link them here to avoid duplicate symbols.
+        println!("cargo:warning=[GGML] Linking to GGML libraries with base name: {}", lib_base_name);
         
-        // Warn if features are requested but ggml-rs might not have them
-        // Note: Parent crates must enable features on ggml-rs directly in Cargo.toml
-        // Example: ggml-rs = { version = "...", features = ["cuda"] }
+        // Link to base libraries
+        println!("cargo:rustc-link-lib=dylib={}", lib_base_name);
+        println!("cargo:rustc-link-lib=dylib={}-base", lib_base_name);
+        println!("cargo:rustc-link-lib=dylib={}-cpu", lib_base_name);
+        
+        // Link to feature-specific libraries when enabled
         if cfg!(feature = "cuda") {
+            let cuda_lib_name = format!("{}-cuda", lib_base_name);
+            println!("cargo:rustc-link-lib=dylib={}", cuda_lib_name);
+            // Warn if ggml-cuda library is not found
             if let Some(ref lib_dir) = ggml_lib_dir {
                 let cuda_lib_pattern = if cfg!(windows) {
-                    "ggml-cuda.dll"
+                    format!("{}-cuda.dll", lib_base_name)
                 } else if cfg!(target_os = "macos") {
-                    "libggml-cuda.dylib"
+                    format!("lib{}-cuda.dylib", lib_base_name)
                 } else {
-                    "libggml-cuda.so"
+                    format!("lib{}-cuda.so", lib_base_name)
                 };
-                let cuda_lib = lib_dir.join(cuda_lib_pattern);
+                let cuda_lib = lib_dir.join(&cuda_lib_pattern);
                 if !cuda_lib.exists() {
                     eprintln!(
-                        "cargo:warning=CUDA feature is enabled but ggml-cuda library not found in {}.\n\
+                        "cargo:warning=CUDA feature is enabled but {}-cuda library not found in {}.\n\
                          Make sure ggml-rs is built with CUDA support.\n\
                          In your Cargo.toml, enable the cuda feature on ggml-rs:\n\
                          ggml-rs = {{ version = \"...\", features = [\"cuda\"] }}",
+                        lib_base_name,
                         lib_dir.display()
                     );
                 }
             }
+        }
+        
+        if cfg!(feature = "vulkan") {
+            let vulkan_lib_name = format!("{}-vulkan", lib_base_name);
+            println!("cargo:rustc-link-lib=dylib={}", vulkan_lib_name);
+        }
+        
+        if cfg!(feature = "metal") {
+            let metal_lib_name = format!("{}-metal", lib_base_name);
+            println!("cargo:rustc-link-lib=dylib={}", metal_lib_name);
         }
     }
 
@@ -967,12 +1000,52 @@ fn main() {
         // When using shared GGML, filter out embedded GGML DLLs
         // (ggml-rs handles copying its own DLLs)
         if cfg!(feature = "use-shared-ggml") {
+            // Determine library base name based on namespace
+            let lib_base_name = ggml_namespace.unwrap_or("ggml");
+            
             libs_assets.retain(|asset| {
                 let filename = asset.file_name().unwrap().to_str().unwrap();
                 // Keep llama.dll and other non-GGML DLLs
                 // Filter out ggml*.dll (ggml.dll, ggml-base.dll, ggml-cpu.dll, etc.)
+                // Also filter out namespace-aware names (ggml_llama*.dll, ggml_whisper*.dll)
                 !filename.starts_with("ggml")
             });
+            
+            // Copy feature-specific GGML libraries from ggml-rs
+            if let Some(ref lib_dir) = ggml_lib_dir {
+                if lib_dir.exists() {
+                    let shared_lib_pattern = if cfg!(windows) {
+                        "*.dll"
+                    } else if cfg!(target_os = "macos") {
+                        "*.dylib"
+                    } else {
+                        "*.so"
+                    };
+                    
+                    let pattern = lib_dir.join(shared_lib_pattern);
+                    debug_log!("Looking for feature-specific GGML libraries in: {}", pattern.display());
+                    
+                    for entry in glob(pattern.to_str().unwrap()).unwrap() {
+                        match entry {
+                            Ok(path) => {
+                                let filename = path.file_name().unwrap().to_str().unwrap();
+                                // Only copy feature-specific libraries when their features are enabled
+                                // Base libraries (ggml, ggml-base, ggml-cpu) are already handled by ggml-rs
+                                // Check for namespace-aware names (e.g., ggml_llama-cuda.dll or ggml-cuda.dll)
+                                let should_copy = (cfg!(feature = "cuda") && filename.contains(&format!("{}-cuda", lib_base_name)))
+                                    || (cfg!(feature = "vulkan") && filename.contains(&format!("{}-vulkan", lib_base_name)))
+                                    || (cfg!(feature = "metal") && filename.contains(&format!("{}-metal", lib_base_name)));
+                                
+                                if should_copy {
+                                    debug_log!("Found feature-specific GGML library: {}", path.display());
+                                    libs_assets.push(path);
+                                }
+                            }
+                            Err(e) => debug_log!("Error globbing for GGML libraries: {}", e),
+                        }
+                    }
+                }
+            }
         }
         
         for asset in libs_assets {
@@ -1003,6 +1076,6 @@ fn main() {
         }
     }
     
-    // Note: When use-shared-ggml is enabled, ggml-rs handles copying its own DLLs.
-    // We don't need to copy GGML DLLs here - each crate copies only what it builds.
+    // Note: When use-shared-ggml is enabled, base GGML DLLs are handled by ggml-rs.
+    // Feature-specific libraries (cuda, vulkan, metal) are copied above.
 }
