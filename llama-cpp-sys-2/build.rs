@@ -619,10 +619,75 @@ fn main() {
             // Set CMAKE_PREFIX_PATH to where ggml-rs installed ggml
             config.define("CMAKE_PREFIX_PATH", prefix.to_str().unwrap());
             
-            // Try to use ggml-config.cmake if it exists, but we'll override the library name
+            // Try to use ggml-config.cmake if it exists, but we'll patch it for namespaced libraries
             let ggml_cmake_dir = prefix.join("lib").join("cmake").join("ggml");
             if ggml_cmake_dir.exists() {
                 config.define("ggml_DIR", ggml_cmake_dir.to_str().unwrap());
+                
+                // Patch ggml-config.cmake to use namespaced library names
+                // This is necessary because ggml-config.cmake looks for "ggml", "ggml-base", etc.
+                // but we have "ggml_llama", "ggml_llama-base", etc.
+                if let Some(ref namespace) = ggml_namespace {
+                    let ggml_config_path = ggml_cmake_dir.join("ggml-config.cmake");
+                    if ggml_config_path.exists() {
+                        match std::fs::read_to_string(&ggml_config_path) {
+                            Ok(config_content) => {
+                                // Replace all library name references with namespaced versions
+                                // The pattern in ggml-config.cmake is:
+                                //   find_library(GGML_LIBRARY ggml
+                                //   find_library(GGML_BASE_LIBRARY ggml-base
+                                //   find_library(${_ggml_backend_pfx}_LIBRARY ${_ggml_backend}
+                                // where ${_ggml_backend} can be ggml-cpu, ggml-cuda, etc.
+                                // Replace all library name references with namespaced versions
+                                // Order matters: replace specific patterns first, then general ones
+                                let mut patched = config_content.clone();
+                                
+                                // Replace specific find_library calls first (most specific patterns)
+                                patched = patched.replace(
+                                    "find_library(GGML_BASE_LIBRARY ggml-base",
+                                    &format!("find_library(GGML_BASE_LIBRARY {}-base", namespace)
+                                );
+                                patched = patched.replace(
+                                    "find_library(GGML_LIBRARY ggml",
+                                    &format!("find_library(GGML_LIBRARY {}", namespace)
+                                );
+                                
+                                // Replace component library names in backend lists and variables
+                                // These appear in GGML_AVAILABLE_BACKENDS and ${_ggml_backend} usage
+                                patched = patched.replace("ggml-cpu", &format!("{}-cpu", namespace));
+                                patched = patched.replace("ggml-cuda", &format!("{}-cuda", namespace));
+                                patched = patched.replace("ggml-vulkan", &format!("{}-vulkan", namespace));
+                                patched = patched.replace("ggml-metal", &format!("{}-metal", namespace));
+                                
+                                // Replace quoted library names (for safety)
+                                patched = patched.replace("\"ggml\"", &format!("\"{}\"", namespace));
+                                patched = patched.replace("'ggml'", &format!("'{}'", namespace));
+                                patched = patched.replace("\"ggml-base\"", &format!("\"{}-base\"", namespace));
+                                patched = patched.replace("'ggml-base'", &format!("'{}-base'", namespace));
+                                
+                                if patched != config_content {
+                                    if let Err(e) = std::fs::write(&ggml_config_path, &patched) {
+                                        eprintln!(
+                                            "cargo:warning=[GGML] Failed to patch ggml-config.cmake: {}\n\
+                                             CMake may fail to find namespaced libraries.",
+                                            e
+                                        );
+                                    } else {
+                                        println!("cargo:warning=[GGML] Patched ggml-config.cmake to use namespaced library: {}", namespace);
+                                        debug_log!("Patched ggml-config.cmake: {} -> {}", "ggml", namespace);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "cargo:warning=[GGML] Could not read ggml-config.cmake to patch: {}\n\
+                                     CMake may fail to find namespaced libraries.",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -645,42 +710,64 @@ fn main() {
                 let ggml_lib_path = lib_dir.join(&ggml_lib_name);
                 
                 if ggml_lib_path.exists() {
-                    // Workaround: ggml-config.cmake looks for "ggml.lib" but we have "ggml_llama.lib"
-                    // Create a temporary symlink/copy so find_library can find it
-                    let ggml_fallback_name = if cfg!(windows) {
-                        "ggml.lib"
-                    } else if cfg!(target_os = "macos") {
-                        "libggml.dylib"
-                    } else {
-                        "libggml.so"
-                    };
-                    let ggml_fallback_path = lib_dir.join(ggml_fallback_name);
-                    
-                    // Only create fallback if it doesn't exist and we're using a namespace
-                    if ggml_namespace.is_some() && !ggml_fallback_path.exists() {
-                        // Try to create a hard link (works on Windows and Unix)
-                        if let Err(e) = std::fs::hard_link(&ggml_lib_path, &ggml_fallback_path) {
-                            // If hard link fails, try copy (for cross-filesystem scenarios)
-                            if let Err(e2) = std::fs::copy(&ggml_lib_path, &ggml_fallback_path) {
-                                eprintln!(
-                                    "cargo:warning=[GGML] Could not create fallback library {}: {} (hard link) / {} (copy).\n\
-                                     CMake may fail to find the library.",
-                                    ggml_fallback_name, e, e2
-                                );
-                            } else {
-                                println!("cargo:warning=[GGML] Created fallback library: {} -> {}", ggml_fallback_name, ggml_lib_path.display());
-                            }
-                        } else {
-                            println!("cargo:warning=[GGML] Created fallback library link: {} -> {}", ggml_fallback_name, ggml_lib_path.display());
-                        }
-                    }
-                    
                     // Set the library path directly for CMake as a cache variable
-                    // This will be used by find_library in ggml-config.cmake
+                    // This will be used by find_library in ggml-config.cmake (after patching)
                     config.define("GGML_LIBRARY", ggml_lib_path.to_str().unwrap());
                     // Also set it as a cache variable so find_library will use it
                     config.define("GGML_LIBRARY:FILEPATH", ggml_lib_path.to_str().unwrap());
                     println!("cargo:warning=[GGML] Setting GGML_LIBRARY to: {}", ggml_lib_path.display());
+                    
+                    // Also create fallback libraries for component libraries if using namespace
+                    // This is a backup in case the patching doesn't work completely
+                    if ggml_namespace.is_some() {
+                        let component_libs = vec!["base", "cpu"];
+                        let mut feature_components = Vec::new();
+                        if cfg!(feature = "cuda") {
+                            feature_components.push("cuda");
+                        }
+                        if cfg!(feature = "vulkan") {
+                            feature_components.push("vulkan");
+                        }
+                        if cfg!(feature = "metal") {
+                            feature_components.push("metal");
+                        }
+                        
+                        for component in component_libs.iter().chain(feature_components.iter()) {
+                            let namespaced_lib_name = if cfg!(windows) {
+                                format!("{}-{}.lib", lib_base_name, component)
+                            } else if cfg!(target_os = "macos") {
+                                format!("lib{}-{}.dylib", lib_base_name, component)
+                            } else {
+                                format!("lib{}-{}.so", lib_base_name, component)
+                            };
+                            let namespaced_lib_path = lib_dir.join(&namespaced_lib_name);
+                            
+                            if namespaced_lib_path.exists() {
+                                let fallback_lib_name = if cfg!(windows) {
+                                    format!("ggml-{}.lib", component)
+                                } else if cfg!(target_os = "macos") {
+                                    format!("libggml-{}.dylib", component)
+                                } else {
+                                    format!("libggml-{}.so", component)
+                                };
+                                let fallback_lib_path = lib_dir.join(&fallback_lib_name);
+                                
+                                if !fallback_lib_path.exists() {
+                                    // Try to create a hard link (works on Windows and Unix)
+                                    if let Err(e) = std::fs::hard_link(&namespaced_lib_path, &fallback_lib_path) {
+                                        // If hard link fails, try copy (for cross-filesystem scenarios)
+                                        if let Err(e2) = std::fs::copy(&namespaced_lib_path, &fallback_lib_path) {
+                                            debug_log!("Could not create fallback library {}: {} / {}", fallback_lib_name, e, e2);
+                                        } else {
+                                            debug_log!("Created fallback library: {} -> {}", fallback_lib_name, namespaced_lib_path.display());
+                                        }
+                                    } else {
+                                        debug_log!("Created fallback library link: {} -> {}", fallback_lib_name, namespaced_lib_path.display());
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else {
                     eprintln!(
                         "cargo:warning=[GGML] Namespaced library {} not found in {}.\n\
