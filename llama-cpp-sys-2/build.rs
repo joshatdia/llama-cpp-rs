@@ -230,22 +230,26 @@ fn main() {
     }
 
     // Get ggml-rs paths if available (when use-shared-ggml is enabled)
-    // Note: The ggml-rs crate exports DEP_GGML_* variables (not DEP_GGML_RS_*)
-    // because the crate name is "ggml", not "ggml-rs"
+    // Try both DEP_GGML_* and DEP_GGML_RS_* variable names for compatibility
+    // Note: The actual crate name is "ggml", so it exports DEP_GGML_* variables
     let ggml_root = env::var("DEP_GGML_ROOT")
+        .or_else(|_| env::var("DEP_GGML_RS_ROOT"))
         .or_else(|_| {
             // Fallback: try to derive root from DEP_GGML_LIB_DIR
-            env::var("DEP_GGML_LIB_DIR").map(|lib| {
-                let lib_path = PathBuf::from(&lib);
-                lib_path
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| lib)
-            })
+            env::var("DEP_GGML_LIB_DIR")
+                .or_else(|_| env::var("DEP_GGML_RS_LIB_DIR"))
+                .map(|lib| {
+                    let lib_path = PathBuf::from(&lib);
+                    lib_path
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| lib)
+                })
         })
         .ok();
     
     let ggml_lib_dir = env::var("DEP_GGML_LIB_DIR")
+        .or_else(|_| env::var("DEP_GGML_RS_LIB_DIR"))
         .map(PathBuf::from)
         .ok()
         .or_else(|| {
@@ -253,6 +257,7 @@ fn main() {
                 .map(|root| PathBuf::from(root).join("lib"))
         });
     let ggml_include_dir = env::var("DEP_GGML_INCLUDE")
+        .or_else(|_| env::var("DEP_GGML_RS_INCLUDE"))
         .map(PathBuf::from)
         .ok();
     let ggml_prefix = ggml_root.as_ref()
@@ -633,13 +638,14 @@ fn main() {
             config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
         }
         
-        // Link to shared ggml libraries from ggml-rs
-        // Determine library base name based on namespace
+        // Note: According to the guide, ggml-rs handles all linking automatically.
+        // However, we still need to set the library search path for CMake and DLL copying.
+        // Determine library base name based on namespace for DLL copying
         let lib_base_name = ggml_namespace.unwrap_or("ggml");
         
-        println!("cargo:warning=[GGML] Linking to GGML libraries with base name: {}", lib_base_name);
+        println!("cargo:warning=[GGML] Using namespace-specific GGML libraries with base name: {}", lib_base_name);
         
-        // Verify base libraries exist before linking
+        // Verify libraries exist (for debugging)
         if let Some(ref lib_dir) = ggml_lib_dir {
             if lib_dir.exists() {
                 let base_lib_pattern = if cfg!(windows) {
@@ -661,16 +667,24 @@ fn main() {
                         lib_dir.display()
                     );
                     
-                    // List available libraries for debugging
-                    debug_log!("Available libraries in {}:", lib_dir.display());
+                    // List available libraries for debugging (make it visible)
+                    eprintln!("cargo:warning=[GGML] Available libraries in {}:", lib_dir.display());
                     if let Ok(entries) = std::fs::read_dir(lib_dir) {
+                        let mut found_any = false;
                         for entry in entries.flatten() {
                             if let Some(name) = entry.file_name().to_str() {
-                                debug_log!("  - {}", name);
+                                eprintln!("cargo:warning=[GGML]   - {}", name);
+                                found_any = true;
                             }
                         }
+                        if !found_any {
+                            eprintln!("cargo:warning=[GGML]   (no libraries found)");
+                        }
+                    } else {
+                        eprintln!("cargo:warning=[GGML]   (could not read directory)");
                     }
                 } else {
+                    println!("cargo:warning=[GGML] Found base library: {}", base_lib.display());
                     debug_log!("Found base library: {}", base_lib.display());
                 }
             } else {
@@ -682,47 +696,8 @@ fn main() {
             }
         }
         
-        // Link to base libraries
-        println!("cargo:rustc-link-lib=dylib={}", lib_base_name);
-        println!("cargo:rustc-link-lib=dylib={}-base", lib_base_name);
-        println!("cargo:rustc-link-lib=dylib={}-cpu", lib_base_name);
-        
-        // Link to feature-specific libraries when enabled
-        if cfg!(feature = "cuda") {
-            let cuda_lib_name = format!("{}-cuda", lib_base_name);
-            println!("cargo:rustc-link-lib=dylib={}", cuda_lib_name);
-            // Warn if ggml-cuda library is not found
-            if let Some(ref lib_dir) = ggml_lib_dir {
-                let cuda_lib_pattern = if cfg!(windows) {
-                    format!("{}-cuda.dll", lib_base_name)
-                } else if cfg!(target_os = "macos") {
-                    format!("lib{}-cuda.dylib", lib_base_name)
-                } else {
-                    format!("lib{}-cuda.so", lib_base_name)
-                };
-                let cuda_lib = lib_dir.join(&cuda_lib_pattern);
-                if !cuda_lib.exists() {
-                    eprintln!(
-                        "cargo:warning=CUDA feature is enabled but {}-cuda library not found in {}.\n\
-                         Make sure ggml-rs is built with CUDA support.\n\
-                         In your Cargo.toml, enable the cuda feature on ggml-rs:\n\
-                         ggml-rs = {{ version = \"...\", features = [\"cuda\"] }}",
-                        lib_base_name,
-                        lib_dir.display()
-                    );
-                }
-            }
-        }
-        
-        if cfg!(feature = "vulkan") {
-            let vulkan_lib_name = format!("{}-vulkan", lib_base_name);
-            println!("cargo:rustc-link-lib=dylib={}", vulkan_lib_name);
-        }
-        
-        if cfg!(feature = "metal") {
-            let metal_lib_name = format!("{}-metal", lib_base_name);
-            println!("cargo:rustc-link-lib=dylib={}", metal_lib_name);
-        }
+        // Note: ggml-rs handles linking automatically, so we don't need to link here.
+        // We only need to set the library search path (already done above) and copy DLLs (done below).
     }
 
     // Would require extra source files to pointlessly
@@ -1105,10 +1080,12 @@ fn main() {
                             Ok(path) => {
                                 let filename = path.file_name().unwrap().to_str().unwrap();
                                 
-                                // Check if this is a namespace-specific library we need to copy
+                                // Check if this is a namespace-specific runtime library (DLL/dylib/so) we need to copy
+                                // Note: We only copy runtime libraries, not linking libraries (.lib files)
                                 let should_copy = libraries_to_copy.iter().any(|lib_name| {
                                     if cfg!(windows) {
-                                        filename == format!("{}.dll", lib_name) || filename == format!("{}.lib", lib_name)
+                                        // Only copy .dll files, not .lib files (those are for linking)
+                                        filename == format!("{}.dll", lib_name)
                                     } else if cfg!(target_os = "macos") {
                                         filename == format!("lib{}.dylib", lib_name)
                                     } else {
@@ -1116,7 +1093,8 @@ fn main() {
                                     }
                                 }) || feature_libs.iter().any(|lib_name| {
                                     if cfg!(windows) {
-                                        filename == format!("{}.dll", lib_name) || filename == format!("{}.lib", lib_name)
+                                        // Only copy .dll files, not .lib files (those are for linking)
+                                        filename == format!("{}.dll", lib_name)
                                     } else if cfg!(target_os = "macos") {
                                         filename == format!("lib{}.dylib", lib_name)
                                     } else {
@@ -1175,3 +1153,4 @@ fn main() {
     // Note: When use-shared-ggml is enabled, base GGML DLLs are handled by ggml-rs.
     // Feature-specific libraries (cuda, vulkan, metal) are copied above.
 }
+
