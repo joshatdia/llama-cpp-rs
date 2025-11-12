@@ -69,6 +69,8 @@ cmake = "0.1"
 find_cuda_helper = "0.2.0"
 glob = "0.3.3"
 walkdir = "2"
+# ggml-rs must be in [build-dependencies] so build.rs can access DEP_GGML_RS_GGML_LLAMA_* variables
+# These variables are only exported to build scripts when the crate is in [build-dependencies]
 ggml-rs = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
 
 [features]
@@ -87,8 +89,10 @@ openmp = []
 shared-stdcxx = []
 mtmd = []
 # Use shared GGML backend to avoid duplicate symbol conflicts
-# When use-shared-ggml is enabled, automatically use namespace-llama to avoid conflicts
-use-shared-ggml = ["ggml-rs", "namespace-llama"]
-# Namespace feature - passes through to ggml-rs to enable symbol namespacing
-# This repo always uses ggml_llama namespace when use-shared-ggml is enabled
+# When use-shared-ggml is enabled, it enables ggml-rs in both [dependencies] and [build-dependencies]
+# This allows build.rs to access DEP_GGML_RS_GGML_LLAMA_* environment variables
+# Both variants (whisper and llama) are always built by ggml-rs, so no namespace feature flags needed
+use-shared-ggml = ["ggml-rs"]
+# Namespace feature - kept for backward compatibility but not required
+# Both variants are always built by ggml-rs unconditionally
 namespace-llama = ["ggml-rs?/namespace-llama"]
